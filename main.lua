@@ -21,6 +21,8 @@ espParser.config = jsonConfig.Load(
 	}
 )
 
+tableHelper.print(espParser.config)
+
 local structTypes = {
     b = 1, --signed char
     B = 1, --unsigned char
@@ -72,7 +74,17 @@ local p = {
 	str = function(d) return v(d, "s", 1) end,
 	char = function(n)
 		return function(d) return v(d, "c" .. n, 1) end
-	end,
+    end,
+    location = function(d)
+        return {
+            posX = v(d, "f", 1),
+            posY = v(d, "f"),
+            posZ = v(d, "f"),
+            rotX = v(d, "f"),
+            rotY = v(d, "f"),
+            rotZ = v(d, "f")
+        }
+    end,
 	TODO = function(d) return d end
 }
 local subRecordParsers = {
@@ -304,7 +316,7 @@ local subRecordParsers = {
 		AI_E = p.TODO,
 		CNDT = p.str,
 		AI_A = p.TODO,
-		DODT = p.TODO,
+		DODT = p.location,
 		DNAM = p.str,
 		XSCL = p.float
 	},
@@ -495,34 +507,41 @@ local subRecordParsers = {
 	},
 	CELL = {
 		NAME = p.str,
-		DATA = p.TODO,
+        DATA = function(d)
+            return {
+                Flags = v(d, "i", 1),
+				GridX = v(d, "i"),
+				GridY = v(d, "i")
+            }
+        end,
 		RGNN = p.str,
 		NAM0 = p.int,
 
 		NAM5 = p.int,
 
 		WHGT = p.float,
-		AMBI = p.TODO,
+        AMBI = p.TODO,
 
-		--[[ TODO
-		FRMR = f.int,
-		NAME = f.str,
-		XSCL = f.float,
-		DELE = f.int,
-		DODT = f.TODO,
-		DNAM = f.str,
-		FLTV = f.int,
-		KNAM = f.str,
-		TNAM = f.str,
-		UNAM = f.byte,
-		ANAM = f.str,
-		BNAM = f.str,
-		INTV = f.int,
-		NAM9 = f.int,
-		XSOL = f.str,
-		DATA = f.TODO
-		]]
-	},
+        FRMR = p.int
+    },
+    CELL_OBJECT = {
+        FRMR = p.int,
+        NAME = p.str,
+        XSCL = p.float,
+        DELE = p.int,
+        DODT = p.location,
+        DNAM = p.str,
+        FLTV = p.int,
+        KNAM = p.str,
+        TNAM = p.str,
+        UNAM = p.byte,
+        ANAM = p.str,
+        BNAM = p.str,
+        INTV = p.int,
+        NAM9 = p.int,
+        XSOL = p.str,
+        DATA = p.location
+    },
 	LAND = {
 		INTV = p.TODO,
 		DATA = p.int,
@@ -575,22 +594,43 @@ function espParser.parseRecord(stream)
 
 	record.subRecords = {}
 	local finish = stream:seek() + record.size
-	local srs = {}
+    local srs = {}
+    local objects = {}
+    local object = nil
+    local recordName = record.name
 	while stream:seek() < finish do
-		local subRecord = espParser.parseSubRecord(stream, record.name)
-		local value = subRecord.value or subRecord.data
-		if srs[subRecord.name] then
-			if srs[subRecord.name] == 1 then
-				record.subRecords[subRecord.name] = { record.subRecords[subRecord.name], value }
-			else
-				table.insert(record.subRecords[subRecord.name], value)
-			end
-			srs[subRecord.name] = srs[subRecord.name]  + 1
-		else
-			record.subRecords[subRecord.name] = value
-			srs[subRecord.name] = 1
-		end
-	end
+        local subRecord = espParser.parseSubRecord(stream, recordName)
+        if record.name == "CELL" then
+            if subRecord.name == "FRMR" then
+                recordName = "CELL_OBJECT"
+                if object then
+                    table.insert(objects, object)
+                end
+                object = { FRMR = subRecord.value or subRecord.data }
+            elseif object then
+                object[subRecord.name] = subRecord.value or subRecord.data
+            end
+        else
+            local value = subRecord.value or subRecord.data
+            if srs[subRecord.name] then
+                if srs[subRecord.name] == 1 then
+                    record.subRecords[subRecord.name] = { record.subRecords[subRecord.name], value }
+                else
+                    table.insert(record.subRecords[subRecord.name], value)
+                end
+                srs[subRecord.name] = srs[subRecord.name]  + 1
+            else
+                record.subRecords[subRecord.name] = value
+                srs[subRecord.name] = 1
+            end
+        end
+    end
+    if object then
+        table.insert(objects, object)
+    end
+    if objects then
+        record.objects = objects
+    end
 
 	return record
 end
@@ -600,7 +640,8 @@ function espParser.parseSubRecord(stream, recordName)
 	local header = stream:read(8)
 	subRecord.name = v(header, "c4", 1)
 	subRecord.size = v(header, "i")
-	subRecord.data = stream:read(subRecord.size)
+    subRecord.data = stream:read(subRecord.size)
+
 	local recordParsers = subRecordParsers[recordName]
 	if recordParsers and recordParsers[subRecord.name] then
 		subRecord.value = recordParsers[subRecord.name](subRecord.data)
@@ -609,12 +650,15 @@ function espParser.parseSubRecord(stream, recordName)
 	return subRecord
 end
 
---Global Function
-
 espParser.processFiles = function()
 	local files
-    if espParser.config.requiredDataFiles then
-        files = jsonInterface.load("requiredDataFiles.json")
+    if espParser.config.useRequiredDataFiles then
+        local requiredDataFiles = jsonInterface.load("requiredDataFiles.json")
+        files  = {}
+        for _, file in ipairs(requiredDataFiles) do
+            local fileName = next(file)
+            table.insert(files, fileName)
+        end
     else
         files = espParser.config.files
 	end
@@ -622,21 +666,19 @@ espParser.processFiles = function()
 	tes3mp.LogMessage(enumerations.log.INFO, "[espParser] Started")
 	customEventHooks.triggerHandlers("espParser_Start", customEventHooks.makeEventStatus(true, true), {files})
 
-    for i = 1, #files do
-		for file, _ in pairs(files[i]) do
-			tes3mp.LogMessage(enumerations.log.INFO, "[espParser] Loading: " .. file)
-			customEventHooks.triggerHandlers("espParser_File", customEventHooks.makeEventStatus(true, true), {file})
-			local fullPath = tes3mp.GetDataPath() .. "/" .. espParser.config.espPath .. file
-			fullPath = fullPath:gsub("\\", "/")
-			local f = io.open(fullPath, "rb")
+    for _, file in ipairs(files) do
+        tes3mp.LogMessage(enumerations.log.INFO, "[espParser] Loading: " .. file)
+        customEventHooks.triggerHandlers("espParser_File", customEventHooks.makeEventStatus(true, true), {file})
+        local fullPath = tes3mp.GetDataPath() .. "/" .. espParser.config.espPath .. file
+        fullPath = fullPath:gsub("\\", "/")
+        local f = io.open(fullPath, "rb")
 
-			if f == nil then error("[espParser] Could not open " .. fullPath) end
-			while f:read(0) do
-				local record = espParser.parseRecord(f)
-				customEventHooks.triggerHandlers("espParser_Record", customEventHooks.makeEventStatus(true, true), {record, file})
-			end
-			customEventHooks.triggerHandlers("espParser_FileDone", customEventHooks.makeEventStatus(true, true), {file})
+        if f == nil then error("[espParser] Could not open " .. fullPath) end
+        while f:read(0) do
+            local record = espParser.parseRecord(f)
+            customEventHooks.triggerHandlers("espParser_Record", customEventHooks.makeEventStatus(true, true), {record, file})
         end
+        customEventHooks.triggerHandlers("espParser_FileDone", customEventHooks.makeEventStatus(true, true), {file})
 	end
 
 	tes3mp.LogMessage(enumerations.log.INFO, "[espParser] Finished")
